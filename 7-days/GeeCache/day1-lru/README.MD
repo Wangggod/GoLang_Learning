@@ -81,4 +81,90 @@ type entry struct {
 ```
 定义结构体entry中有两个数据，一个是string型的key，和map的key是对应的。另一个是Value型的value，这样方便使用接口进行长度计算。
 
+我们可以理解为，Cache是定义了“双向链表+map”的结构体，但当我们要插入一个新的Cache记录时，必然要包含“链表节点+map键值”
+
 有一点好奇的是，为什么有了map的键值对应还要在链表中保留key值呢？map中的结构为[key: value]，key可以理解为map的编号，value理解为实际cache队列中的值。如果我们要淘汰头结点的时候，同时需要把map中的元素删除。假设链表没有设置key，那么则无法在map中找到对应的元素。所以这其实是一个双向对应的关系。
+
+
+
+#### 2.4 func New(maxBytes int64, onEvicted func(string, Value)) *Cache{  }
+```
+
+func New(maxBytes int64, onEvicted func(string, Value)) *Cache {
+    return &Cache{
+        maxBytes:  maxBytes,
+        ll:        list.New(),
+        cache:     make(map[string]*list.Element),
+        OnEvicted: onEvicted,
+    }
+}
+
+
+```
+当我们定义好Cache结构体之后，需要调用New函数为其分配对应的空间。其中链表自带new，map使用make分配空间。函数名直接定义即可。
+
+#### 2.5、func (c *Cache) Get(key string) (value Value, ok bool)
+
+```
+func (c *Cache) Get(key string) (value Value, ok bool) {
+    if ele, ok := c.cache[key]; ok {
+        c.ll.MoveToFront(ele)
+        kv := ele.Value.(*entry)
+        return kv.value, true
+    }
+    return
+}
+```
+当我们拿到一个值后，首先要判断它有没有在缓存中，因此第一步要设计一个查找方法。
+首先查找的对象是` (c *Cache)`，输入为`（key string）`即通过键值直接查找。返回值为`(value Value, ok bool)`，
+
+查找开始时首先抛出判断语句`if ele, ok := c.cache[key]; ok`，这句话的意思是首先我们输入的是键值key，即要查询的缓存值，可以是图像或者数值，这里我们就当做是定义里面的字符串。
+
+拿到待查询的key之后，我们先传入`c.cache[key]`，即将一个Cache类型的c的成员变量cache[key]分别赋值给ele和ok。由于ok是bool型，如果这个值不存在，那么ok的值就是否，因此无法进入后续语句。。因为map中存放的value是链表节点，所以我们通过key访问map得到的ele就是链表中的节点。
+
+如果key值查询成功，那么将这个`c.cache[key]`传给ele。然后调用`MoveToFront`将ele移动到队尾（注意这个函数的命名，不要被迷惑了）。然后将kv赋值为`ele.Value.(*entry)`，因为此时ele被是一个Cache类型，可以使用接口Value来获得这个节点的值。即用key和该节点的value，生成一个entry（可以理解为真实的cache）
+
+#### 2.6、func (c *Cache) RemoveOldest()
+该方法用于删除节点，即把队列的第一个弹出去。
+```
+func (c *Cache) RemoveOldest() {
+    ele := c.ll.Back()
+    if ele != nil {
+        c.ll.Remove(ele)
+        kv := ele.Value.(*entry)
+        delete(c.cache, kv.key)
+        c.nBytes -= int64(len(kv.key)) + int64(kv.value.Len())
+        if c.OnEvicted != nil {
+            c.OnEvicted(kv.key, kv.value)
+        }
+    }
+}
+```
+首先` ele := c.ll.Back()`直接获取队列第一个元素，暂时还不知道它是否符合条件。因此立刻使用` if ele != nil`判定其是否为空，如果不是则继续。
+
+继续之后使用队列函数直接删除ele的节点，`c.ll.Remove(ele)`，删除之后用`kv := ele.Value.(*entry)`获取到这个被删除的节点的值，包括它的key和value，因为我们同时还要去删除map中的映射关系。接着使用`delete(c.cache, kv.key)`删除map与该节点的映射。删除结束后此时链表和map中都不存在这个数据了，因此我们要更新占用内存nBytes。我们把当前的nBytes - （key的长度+value的长度）即获得当前内存的值。（因为实际中我们存储cache时除了值还有映射关系，所以要减去两个）。
+
+#### 2.7、func (c *Cache) Add(key string, value Value)
+当我们往cache中新增值时应该怎么做呢？
+```
+func (c *Cache) Add(key string, value Value) {
+    if ele, ok := c.cache[key]; ok {
+        c.ll.MoveToFront(ele)
+        kv := ele.Value.(*entry)
+        c.nBytes += int64(value.Len()) - int64(kv.value.Len())
+        kv.value = value
+    } else {
+        ele := c.ll.PushFront(&entry{key, value})
+        c.cache[key] = ele
+        c.nBytes += int64(len(key)) + int64(value.Len())
+    }
+    for c.maxBytes != 0 && c.maxBytes < c.nBytes {
+        c.RemoveOldest()
+    }
+}
+```
+首先和查找一样，先判断是否有，如果有的话则移到队列后面。不一样的是这个时候可能要修改值，所以可能要修改大小和更新值。
+
+如果这个值目前不在cache中，则把这个值插入，并且计算大小。
+
+最后记得判断是否超出，如果超出的话就要移除掉队头的那个。
