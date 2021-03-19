@@ -30,7 +30,7 @@ func helper(root *TreeNode) ResultType {
 	if root == nil {
 		return ResultType{
 			SinglePath: 0,
-			MaxPath:    -(1 << 31),
+			MaxPath:    -(1 << 31), //将1左移31位然后取复数？
 		}
 	}
 	left := helper(root.Left)
